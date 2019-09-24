@@ -1,6 +1,7 @@
 package cn.wildfirechat.push;
 
 import android.app.ActivityManager;
+import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -9,6 +10,11 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.text.TextUtils;
+
+import androidx.lifecycle.Lifecycle;
+import androidx.lifecycle.LifecycleObserver;
+import androidx.lifecycle.OnLifecycleEvent;
+import androidx.lifecycle.ProcessLifecycleOwner;
 
 import com.huawei.hms.api.ConnectionResult;
 import com.huawei.hms.api.HuaweiApiClient;
@@ -21,7 +27,6 @@ import com.xiaomi.mipush.sdk.MiPushClient;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Properties;
@@ -37,12 +42,14 @@ public class PushService {
     private boolean hasHMSToken;
     private PushServiceType pushServiceType;
     private static PushService INST = new PushService();
+    private static String applicationId;
 
     public enum PushServiceType {
         Unknown, Xiaomi, HMS, MeiZu
     }
 
-    public static void init(Context gContext) {
+    public static void init(Application gContext, String applicationId) {
+        PushService.applicationId = applicationId;
         String sys = getSystem();
         if (SYS_EMUI.equals(sys) && INST.isHMSConfigured(gContext)) {
             INST.pushServiceType = PushServiceType.HMS;
@@ -55,9 +62,21 @@ public class PushService {
             INST.pushServiceType = PushServiceType.Xiaomi;
             INST.initXiaomi(gContext);
         }
+
+        ProcessLifecycleOwner.get().getLifecycle().addObserver(new LifecycleObserver() {
+            @OnLifecycleEvent(Lifecycle.Event.ON_START)
+            public void onForeground() {
+                clearNotification(gContext);
+            }
+
+            @OnLifecycleEvent(Lifecycle.Event.ON_STOP)
+            public void onBackground() {
+            }
+        });
+
     }
 
-    public static void clearNotification(Context context) {
+    private static void clearNotification(Context context) {
         if (INST.pushServiceType == PushServiceType.Xiaomi) {
             MiPushClient.clearNotification(context);
         } else {
@@ -66,7 +85,7 @@ public class PushService {
     }
 
     public static void showMainActivity(Context context) {
-        String action = "cn.wildfirechat.chat.main";
+        String action = applicationId + ".main";
         Intent intent = new Intent(action);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
@@ -265,7 +284,7 @@ public class PushService {
             } else if (getMeizuFlymeOSFlag().toLowerCase().contains("flyme")) {
                 SYS = SYS_FLYME;//魅族
             }
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
 
             if (Build.MANUFACTURER.equalsIgnoreCase("HUAWEI")) {

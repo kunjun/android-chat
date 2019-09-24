@@ -14,7 +14,7 @@ import com.afollestad.materialdialogs.MaterialDialog;
 import java.util.HashMap;
 import java.util.Map;
 
-import butterknife.Bind;
+import butterknife.BindView;
 import butterknife.OnClick;
 import butterknife.OnTextChanged;
 import cn.wildfire.chat.app.Config;
@@ -28,13 +28,13 @@ import cn.wildfire.chat.kit.net.base.StatusResult;
 import cn.wildfirechat.chat.R;
 
 public class SMSLoginActivity extends WfcBaseActivity {
-    @Bind(R.id.loginButton)
+    @BindView(R.id.loginButton)
     Button loginButton;
-    @Bind(R.id.phoneNumberEditText)
+    @BindView(R.id.phoneNumberEditText)
     EditText phoneNumberEditText;
-    @Bind(R.id.authCodeEditText)
+    @BindView(R.id.authCodeEditText)
     EditText authCodeEditText;
-    @Bind(R.id.requestAuthCodeButton)
+    @BindView(R.id.requestAuthCodeButton)
     Button requestAuthCodeButton;
 
     private String phoneNumber;
@@ -72,7 +72,7 @@ public class SMSLoginActivity extends WfcBaseActivity {
         String phoneNumber = phoneNumberEditText.getText().toString().trim();
         String authCode = authCodeEditText.getText().toString().trim();
 
-        String url = "http://" + Config.APP_SERVER_HOST + ":" + Config.APP_SERVER_PORT + "/login";
+        String url = Config.APP_SERVER_ADDRESS + "/login";
         Map<String, String> params = new HashMap<>();
         params.put("mobile", phoneNumber);
         params.put("code", authCode);
@@ -136,7 +136,7 @@ public class SMSLoginActivity extends WfcBaseActivity {
 
         Toast.makeText(this, "请求验证码...", Toast.LENGTH_SHORT).show();
         String phoneNumber = phoneNumberEditText.getText().toString().trim();
-        String url = "http://" + Config.APP_SERVER_HOST + ":" + Config.APP_SERVER_PORT + "/send_code";
+        String url = Config.APP_SERVER_ADDRESS + "/send_code";
         Map<String, String> params = new HashMap<>();
         params.put("mobile", phoneNumber);
         OKHttpHelper.post(url, params, new SimpleCallback<StatusResult>() {

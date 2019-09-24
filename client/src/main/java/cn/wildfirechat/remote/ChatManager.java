@@ -15,6 +15,7 @@ import android.text.TextUtils;
 import android.util.Log;
 import android.util.LruCache;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleObserver;
@@ -55,7 +56,9 @@ import cn.wildfirechat.message.core.ContentTag;
 import cn.wildfirechat.message.core.MessageDirection;
 import cn.wildfirechat.message.core.MessagePayload;
 import cn.wildfirechat.message.core.MessageStatus;
-import cn.wildfirechat.message.notification.ChangeGroupNameNotificationContent;
+import cn.wildfirechat.message.notification.DismissGroupNotificationContent;
+import cn.wildfirechat.message.notification.KickoffGroupMemberNotificationContent;
+import cn.wildfirechat.message.notification.QuitGroupNotificationContent;
 import cn.wildfirechat.message.notification.RecallMessageContent;
 import cn.wildfirechat.model.ChannelInfo;
 import cn.wildfirechat.model.ChatRoomInfo;
@@ -104,6 +107,7 @@ public class ChatManager {
     private UserSource userSource;
 
     private boolean startLog;
+    private int connectionStatus;
 
     private boolean isBackground = true;
     private List<OnReceiveMessageListener> onReceiveMessageListeners = new ArrayList<>();
@@ -120,6 +124,7 @@ public class ChatManager {
     private List<OnChannelInfoUpdateListener> channelInfoUpdateListeners = new ArrayList<>();
     private List<OnMessageUpdateListener> messageUpdateListeners = new ArrayList<>();
     private List<OnClearMessageListener> clearMessageListeners = new ArrayList<>();
+    private List<OnRemoveConversationListener> removeConversationListeners = new ArrayList<>();
 
     private List<IMServiceStatusListener> imServiceStatusListeners = new ArrayList<>();
 
@@ -238,6 +243,10 @@ public class ChatManager {
         this.userSource = userSource;
     }
 
+    public int getConnectionStatus() {
+        return connectionStatus;
+    }
+
     //App在后台时，如果需要强制连上服务器并收消息，调用此方法。后台时无法保证长时间连接中。
     public void forceConnect() {
         if (mClient != null) {
@@ -272,6 +281,7 @@ public class ChatManager {
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
+                connectionStatus = status;
                 Iterator<OnConnectionStatusChangeListener> iterator = onConnectionStatusChangeListeners.iterator();
                 OnConnectionStatusChangeListener listener;
                 while (iterator.hasNext()) {
@@ -312,19 +322,26 @@ public class ChatManager {
      * @param hasMore  是否还有更多消息待收取
      */
     private void onReceiveMessage(final List<Message> messages, final boolean hasMore) {
-        workHandler.post(() -> {
-            for (Message message : messages) {
-                if (message.content instanceof ChangeGroupNameNotificationContent) {
-                    getGroupInfo(message.conversation.target, true);
-                }
-            }
-        });
         mainHandler.post(() -> {
             Iterator<OnReceiveMessageListener> iterator = onReceiveMessageListeners.iterator();
             OnReceiveMessageListener listener;
             while (iterator.hasNext()) {
                 listener = iterator.next();
                 listener.onReceiveMessage(messages, hasMore);
+            }
+
+            // 消息数大于时，认为是历史消息同步，不通知群被删除
+            if (messages.size() > 10) {
+                return;
+            }
+            for (Message message : messages) {
+                if ((message.content instanceof QuitGroupNotificationContent && ((QuitGroupNotificationContent) message.content).operator.equals(getUserId()))
+                        || (message.content instanceof KickoffGroupMemberNotificationContent && ((KickoffGroupMemberNotificationContent) message.content).kickedMembers.contains(getUserId()))
+                        || message.content instanceof DismissGroupNotificationContent) {
+                    for (OnRemoveConversationListener l : removeConversationListeners) {
+                        l.onConversationRemove(message.conversation);
+                    }
+                }
             }
         });
     }
@@ -335,6 +352,9 @@ public class ChatManager {
      * @param userInfos
      */
     private void onUserInfoUpdate(List<UserInfo> userInfos) {
+        if (userInfos == null || userInfos.isEmpty()) {
+            return;
+        }
         for (UserInfo info : userInfos) {
             userInfoCache.put(info.uid, info);
         }
@@ -383,7 +403,7 @@ public class ChatManager {
                 listener.onFriendListUpdate(friendList);
             }
         });
-        onUserInfoUpdate(getUserInfos(friendList));
+        onUserInfoUpdate(getUserInfos(friendList, null));
     }
 
     private void onFriendReqeustUpdated() {
@@ -1018,6 +1038,18 @@ public class ChatManager {
         clearMessageListeners.remove(listener);
     }
 
+    public void addRemoveConversationListener(OnRemoveConversationListener listener) {
+        if (listener == null) {
+            return;
+        }
+        removeConversationListeners.add(listener);
+    }
+
+    public void removeRemoveConversationListener(OnRemoveConversationListener listener) {
+        removeConversationListeners.remove(listener);
+    }
+
+
     public void addIMServiceStatusListener(IMServiceStatusListener listener) {
         if (listener == null) {
             return;
@@ -1033,17 +1065,16 @@ public class ChatManager {
         try {
             Constructor c = msgContentClazz.getConstructor();
             if (c.getModifiers() != Modifier.PUBLIC) {
-                throw new IllegalArgumentException("the default constructor of messageContent class should be public");
+                throw new IllegalArgumentException("the default constructor of your custom messageContent class should be public");
             }
         } catch (NoSuchMethodException e) {
             e.printStackTrace();
-            throw new IllegalArgumentException("messageContent class must have a default constructor");
+            throw new IllegalArgumentException("custom messageContent class must have a default constructor");
         }
         ContentTag tag = msgContentClazz.getAnnotation(ContentTag.class);
         if (tag == null) {
-            throw new IllegalArgumentException("messageContent class must have a ContentTag annotation");
+            throw new IllegalArgumentException("custom messageContent class must have a ContentTag annotation");
         }
-
     }
 
     /**
@@ -1088,6 +1119,11 @@ public class ChatManager {
         message.sender = sender;
         message.status = status;
         message.serverTime = serverTime;
+        if (this.userId.equals(sender)) {
+            message.direction = MessageDirection.Send;
+        } else {
+            message.direction = MessageDirection.Receive;
+        }
 
         try {
             message = mClient.insertMessage(message, notify);
@@ -1111,15 +1147,13 @@ public class ChatManager {
             return false;
         }
 
-        Message message = new Message();
-        message.messageId = messageId;
-        message.content = newMsgContent;
         try {
+            Message message = mClient.getMessage(messageId);
+            message.content = newMsgContent;
             boolean result = mClient.updateMessage(message);
-            Message newMessage = mClient.getMessage(messageId);
             mainHandler.post(() -> {
                 for (OnMessageUpdateListener listener : messageUpdateListeners) {
-                    listener.onMessageUpdate(newMessage);
+                    listener.onMessageUpdate(message);
                 }
             });
             return result;
@@ -1135,8 +1169,9 @@ public class ChatManager {
      *
      * @param userId
      * @param token
+     * @return 是否是新用户。新用户需要同步信息，耗时较长，可以增加等待提示。
      */
-    public void connect(String userId, String token) {
+    public boolean connect(String userId, String token) {
         if (TextUtils.isEmpty(userId) || TextUtils.isEmpty(token)) {
             throw new IllegalArgumentException("userId and token must be empty!");
         }
@@ -1148,17 +1183,17 @@ public class ChatManager {
 
         if (mClient != null) {
             try {
-                mClient.connect(this.userId, this.token);
                 SharedPreferences sp = gContext.getSharedPreferences("wildfirechat.config", Context.MODE_PRIVATE);
                 sp.edit()
                         .putString("userId", userId)
                         .putString("token", token)
                         .commit();
-                ;
+                return mClient.connect(this.userId, this.token);
             } catch (RemoteException e) {
                 e.printStackTrace();
             }
         }
+        return false;
     }
 
     /**
@@ -1217,6 +1252,7 @@ public class ChatManager {
     public void sendMessage(final Message msg, final int expireDuration, final SendMessageCallback callback) {
         msg.direction = MessageDirection.Send;
         msg.status = MessageStatus.Sending;
+        msg.serverTime = System.currentTimeMillis();
         msg.sender = userId;
         if (!checkRemoteService()) {
             if (callback != null) {
@@ -1234,12 +1270,16 @@ public class ChatManager {
             if (!TextUtils.isEmpty(localPath)) {
                 File file = new File(localPath);
                 if (!file.exists()) {
-                    callback.onFail(ErrorCode.FILE_NOT_EXIST);
+                    if (callback != null) {
+                        callback.onFail(ErrorCode.FILE_NOT_EXIST);
+                    }
                     return;
                 }
 
                 if (file.length() > 100 * 1024 * 1024) {
-                    callback.onFail(ErrorCode.FILE_TOO_LARGE);
+                    if (callback != null) {
+                        callback.onFail(ErrorCode.FILE_TOO_LARGE);
+                    }
                     return;
                 }
             }
@@ -1398,16 +1438,17 @@ public class ChatManager {
      * @param lines             获取哪些会话线路
      * @return
      */
+    @NonNull
     public List<ConversationInfo> getConversationList(List<Conversation.ConversationType> conversationTypes, List<Integer> lines) {
         if (!checkRemoteService()) {
             Log.e(TAG, "Remote service not available");
-            return null;
+            return new ArrayList<>();
         }
 
         if (conversationTypes == null || conversationTypes.size() == 0 ||
                 lines == null || lines.size() == 0) {
             Log.e(TAG, "Invalid conversation type and lines");
-            return null;
+            return new ArrayList<>();
         }
 
         int[] intypes = new int[conversationTypes.size()];
@@ -1425,7 +1466,7 @@ public class ChatManager {
         } catch (RemoteException e) {
             e.printStackTrace();
         }
-        return null;
+        return new ArrayList<>();
     }
 
     /**
@@ -1472,6 +1513,73 @@ public class ChatManager {
         }
         return null;
     }
+
+    public List<Message> getMessagesEx(List<Conversation.ConversationType> conversationTypes, List<Integer> lines, List<Integer> contentTypes, long fromIndex, boolean before, int count, String withUser) {
+        if (!checkRemoteService()) {
+            Log.e(TAG, "Remote service not available");
+            return null;
+        }
+
+        if (conversationTypes == null || conversationTypes.size() == 0 ||
+                lines == null || lines.size() == 0 ||
+                contentTypes == null || contentTypes.size() == 0) {
+            Log.e(TAG, "Invalid conversation type or lines or contentType");
+            return null;
+        }
+
+        int[] intypes = new int[conversationTypes.size()];
+        int[] inlines = new int[lines.size()];
+        int[] inCntTypes = new int[contentTypes.size()];
+        for (int i = 0; i < conversationTypes.size(); i++) {
+            intypes[i] = conversationTypes.get(i).ordinal();
+        }
+
+        for (int j = 0; j < lines.size(); j++) {
+            inlines[j] = lines.get(j);
+        }
+
+        for (int k = 0; k < contentTypes.size(); k++) {
+            inCntTypes[k] = contentTypes.get(k);
+        }
+
+        try {
+            return mClient.getMessagesEx(intypes, inlines, inCntTypes, fromIndex, before, count, withUser);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public List<Message> getMessagesEx2(List<Conversation.ConversationType> conversationTypes, List<Integer> lines, MessageStatus messageStatus, long fromIndex, boolean before, int count, String withUser) {
+        if (!checkRemoteService()) {
+            Log.e(TAG, "Remote service not available");
+            return null;
+        }
+
+        if (conversationTypes == null || conversationTypes.size() == 0 ||
+                lines == null || lines.size() == 0) {
+            Log.e(TAG, "Invalid conversation type or lines");
+            return null;
+        }
+
+        int[] intypes = new int[conversationTypes.size()];
+        int[] inlines = new int[lines.size()];
+        for (int i = 0; i < conversationTypes.size(); i++) {
+            intypes[i] = conversationTypes.get(i).ordinal();
+        }
+
+        for (int j = 0; j < lines.size(); j++) {
+            inlines[j] = lines.get(j);
+        }
+
+        try {
+            return mClient.getMessagesEx2(intypes, inlines, messageStatus == null ? -1 : messageStatus.value(), fromIndex, before, count, withUser);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
 
     public void getRemoteMessages(Conversation conversation, long beforeMessageId, int count, GetRemoteMessageCallback callback) {
         if (!checkRemoteService()) {
@@ -1627,6 +1735,26 @@ public class ChatManager {
         }
     }
 
+    public void clearUnreadStatusEx(List<Conversation.ConversationType> conversationTypes, List<Integer> lines) {
+        if (!checkRemoteService()) {
+            return;
+        }
+        int[] inTypes = new int[conversationTypes.size()];
+        int[] inLines = new int[lines.size()];
+        for (int i = 0; i < conversationTypes.size(); i++) {
+            inTypes[i] = conversationTypes.get(i).ordinal();
+        }
+        for (int j = 0; j < lines.size(); j++) {
+            inLines[j] = lines.get(j);
+        }
+
+        try {
+            mClient.clearUnreadStatusEx(inTypes, inLines);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
     /**
      * 设置audio获取media等媒体消息的播放状态
      *
@@ -1688,6 +1816,9 @@ public class ChatManager {
 
         try {
             mClient.removeConversation(conversation.type.ordinal(), conversation.target, conversation.line, clearMsg);
+            for (OnRemoveConversationListener listener : removeConversationListeners) {
+                listener.onConversationRemove(conversation);
+            }
         } catch (RemoteException e) {
             e.printStackTrace();
         }
@@ -1749,7 +1880,7 @@ public class ChatManager {
         }
     }
 
-    public void searchUser(String keyword, final SearchUserCallback callback) {
+    public void searchUser(String keyword, boolean fuzzy, final SearchUserCallback callback) {
         if (userSource != null) {
             userSource.searchUser(keyword, callback);
             return;
@@ -1761,7 +1892,7 @@ public class ChatManager {
         }
 
         try {
-            mClient.searchUser(keyword, new cn.wildfirechat.client.ISearchUserCallback.Stub() {
+            mClient.searchUser(keyword, fuzzy, new cn.wildfirechat.client.ISearchUserCallback.Stub() {
                 @Override
                 public void onSuccess(final List<UserInfo> userInfos) throws RemoteException {
                     if (callback != null) {
@@ -1822,16 +1953,9 @@ public class ChatManager {
     public String getGroupMemberDisplayName(String groupId, String memberId) {
         UserInfo userInfo = getUserInfo(memberId, groupId, false);
         if (userInfo == null) {
-            return null;
+            return "<" + memberId + ">";
         }
-        if (!TextUtils.isEmpty(userInfo.friendAlias)) {
-            return userInfo.friendAlias;
-        } else if (!TextUtils.isEmpty(userInfo.groupAlias)) {
-            return userInfo.groupAlias;
-        } else if (!TextUtils.isEmpty(userInfo.displayName)) {
-            return userInfo.displayName;
-        }
-        return "<" + memberId + ">";
+        return userInfo.displayName;
     }
 
     public String getUserDisplayName(UserInfo userInfo) {
@@ -2328,10 +2452,6 @@ public class ChatManager {
         }
     }
 
-    public List<UserInfo> getUserInfos(List<String> userIds) {
-        return getUserInfos(userIds, null);
-    }
-
     /**
      * 返回的list里面的元素可能为null
      *
@@ -2356,7 +2476,16 @@ public class ChatManager {
         }
 
         try {
-            List<UserInfo> userInfos = mClient.getUserInfos(userIds, groupId);
+            List<UserInfo> userInfos = new ArrayList<>();
+            int step = 400;
+            int startIndex, endIndex;
+            for (int i = 0; i <= userIds.size() / step; i++) {
+                startIndex = i * step;
+                endIndex = (i + 1) * step;
+                endIndex = endIndex > userIds.size() ? userIds.size() : endIndex;
+                List<UserInfo> us = mClient.getUserInfos(userIds.subList(startIndex, endIndex), groupId);
+                userInfos.addAll(us);
+            }
             if (userInfos != null && userInfos.size() > 0) {
                 for (UserInfo info : userInfos) {
                     if (info != null) {
@@ -2376,10 +2505,76 @@ public class ChatManager {
         return null;
     }
 
+    public void uploadMediaFile(String mediaPath, int mediaType, final UploadMediaCallback callback) {
+        if (!checkRemoteService()) {
+            if (callback != null)
+                callback.onFail(ErrorCode.SERVICE_DIED);
+            return;
+        }
+        File file = new File(mediaPath);
+        if (!file.exists()) {
+            callback.onFail(ErrorCode.FILE_NOT_EXIST);
+            return;
+        }
+        if (file.length() > 900 * 1024) {
+            callback.onFail(ErrorCode.FILE_TOO_LARGE);
+            return;
+        }
+
+        try {
+            mClient.uploadMediaFile(mediaPath, mediaType, new IUploadMediaCallback.Stub() {
+                @Override
+                public void onSuccess(final String remoteUrl) throws RemoteException {
+                    if (callback != null) {
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                callback.onSuccess(remoteUrl);
+                            }
+                        });
+                    }
+                }
+
+                @Override
+                public void onProgress(final long uploaded, final long total) throws RemoteException {
+                    callback.onProgress(uploaded, total);
+                }
+
+                @Override
+                public void onFailure(final int errorCode) throws RemoteException {
+                    if (callback != null) {
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                callback.onFail(errorCode);
+                            }
+                        });
+                    }
+                }
+            });
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            if (callback != null)
+                callback.onFail(ErrorCode.SERVICE_EXCEPTION);
+        }
+    }
+
+
+    /**
+     * @param data      不能超过1M，为了安全，实际只有900K
+     * @param mediaType
+     * @param callback
+     */
     public void uploadMedia(byte[] data, int mediaType, final GeneralCallback2 callback) {
         if (!checkRemoteService()) {
             if (callback != null)
                 callback.onFail(ErrorCode.SERVICE_DIED);
+            return;
+        }
+        if (data.length > 900 * 1024) {
+            if (callback != null) {
+                callback.onFail(ErrorCode.FILE_TOO_LARGE);
+            }
             return;
         }
 
@@ -2551,7 +2746,20 @@ public class ChatManager {
         }
     }
 
-    public void createGroup(String groupId, String groupName, String groupPortrait, List<String> memberIds, List<Integer> lines, MessageContent notifyMsg, final GeneralCallback2 callback) {
+    public String getEncodedClientId() {
+        if (!checkRemoteService()) {
+            return null;
+        }
+
+        try {
+            return mClient.getEncodedClientId();
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public void createGroup(String groupId, String groupName, String groupPortrait, GroupInfo.GroupType groupType, List<String> memberIds, List<Integer> lines, MessageContent notifyMsg, final GeneralCallback2 callback) {
         if (!checkRemoteService()) {
             if (callback != null)
                 callback.onFail(ErrorCode.SERVICE_DIED);
@@ -2564,7 +2772,7 @@ public class ChatManager {
         }
 
         try {
-            mClient.createGroup(groupId, groupName, groupPortrait, memberIds, inlines, content2Payload(notifyMsg), new cn.wildfirechat.client.IGeneralCallback2.Stub() {
+            mClient.createGroup(groupId, groupName, groupPortrait, groupType.value(), memberIds, inlines, content2Payload(notifyMsg), new cn.wildfirechat.client.IGeneralCallback2.Stub() {
                 @Override
                 public void onSuccess(final String result) throws RemoteException {
                     if (callback != null) {
@@ -2963,6 +3171,68 @@ public class ChatManager {
         }
     }
 
+    public void setGroupManager(String groupId, boolean isSet, List<String> memberIds, List<Integer> lines, MessageContent notifyMsg, final GeneralCallback callback) {
+        if (!checkRemoteService()) {
+            if (callback != null)
+                callback.onFail(ErrorCode.SERVICE_DIED);
+            return;
+        }
+
+        int[] inlines = new int[lines.size()];
+        for (int j = 0; j < lines.size(); j++) {
+            inlines[j] = lines.get(j);
+        }
+
+        try {
+            mClient.setGroupManager(groupId, isSet, memberIds, inlines, content2Payload(notifyMsg), new cn.wildfirechat.client.IGeneralCallback.Stub() {
+                @Override
+                public void onSuccess() throws RemoteException {
+                    if (callback != null) {
+                        mainHandler.post(() -> callback.onSuccess());
+                    }
+                }
+
+                @Override
+                public void onFailure(final int errorCode) throws RemoteException {
+                    if (callback != null) {
+                        mainHandler.post(() -> callback.onFail(errorCode));
+                    }
+                }
+            });
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            if (callback != null) {
+                callback.onFail(ErrorCode.SERVICE_EXCEPTION);
+            }
+        }
+    }
+
+    public byte[] encodeData(byte[] data) {
+        if (!checkRemoteService()) {
+            return null;
+        }
+
+        try {
+            return mClient.encodeData(data);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public byte[] decodeData(byte[] data) {
+        if (!checkRemoteService()) {
+            return null;
+        }
+
+        try {
+            return mClient.decodeData(data);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
     public String getUserSetting(int scope, String key) {
         if (!checkRemoteService()) {
             return null;
@@ -3005,7 +3275,10 @@ public class ChatManager {
             if (groupIdMap != null && !groupIdMap.isEmpty()) {
                 for (Map.Entry<String, String> entry : groupIdMap.entrySet()) {
                     if (entry.getValue().equals(fav)) {
-                        groups.add(getGroupInfo(entry.getKey(), false));
+                        GroupInfo info = getGroupInfo(entry.getKey(), false);
+                        if (!(info instanceof NullGroupInfo)) {
+                            groups.add(getGroupInfo(entry.getKey(), false));
+                        }
                     }
                 }
             }
@@ -3081,6 +3354,28 @@ public class ChatManager {
         }
     }
 
+    public String getImageThumbPara() {
+        if (!checkRemoteService()) {
+            return null;
+        }
+
+        try {
+            return mClient.getImageThumbPara();
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    /**
+     * IM服务进程是否bind成功
+     *
+     * @return
+     */
+    public boolean isIMServiceConnected() {
+        return mClient != null;
+    }
+
     public void startLog() {
         startLog = true;
         if (!checkRemoteService()) {
@@ -3135,8 +3430,6 @@ public class ChatManager {
             boolean result = gContext.bindService(intent, serviceConnection, BIND_AUTO_CREATE);
             if (!result) {
                 Log.e(TAG, "Bind service failure");
-            } else {
-                Log.e(TAG, "Chat service not binded");
             }
         } else {
             Log.e(TAG, "Chat manager not initialized");

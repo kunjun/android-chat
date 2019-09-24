@@ -1,8 +1,10 @@
 package cn.wildfire.chat.app.main;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
@@ -10,11 +12,14 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.MenuItem;
 import android.view.View;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.Observer;
 import androidx.lifecycle.ViewModelProviders;
 import androidx.viewpager.widget.ViewPager;
 
@@ -22,19 +27,19 @@ import com.afollestad.materialdialogs.DialogAction;
 import com.afollestad.materialdialogs.MaterialDialog;
 import com.google.android.material.bottomnavigation.BottomNavigationMenuView;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
-import com.king.zxing.CaptureActivity;
 import com.king.zxing.Intents;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import butterknife.Bind;
+import butterknife.BindView;
+import cn.wildfire.chat.kit.IMConnectionStatusViewModel;
+import cn.wildfire.chat.kit.IMServiceStatusViewModel;
 import cn.wildfire.chat.kit.WfcBaseActivity;
 import cn.wildfire.chat.kit.WfcScheme;
-import cn.wildfire.chat.kit.WfcUIKit;
 import cn.wildfire.chat.kit.channel.ChannelInfoActivity;
-import cn.wildfire.chat.kit.contact.ContactFragment;
+import cn.wildfire.chat.kit.contact.ContactListFragment;
 import cn.wildfire.chat.kit.contact.ContactViewModel;
 import cn.wildfire.chat.kit.contact.newfriend.SearchUserActivity;
 import cn.wildfire.chat.kit.conversation.CreateConversationActivity;
@@ -42,6 +47,7 @@ import cn.wildfire.chat.kit.conversationlist.ConversationListFragment;
 import cn.wildfire.chat.kit.conversationlist.ConversationListViewModel;
 import cn.wildfire.chat.kit.conversationlist.ConversationListViewModelFactory;
 import cn.wildfire.chat.kit.group.GroupInfoActivity;
+import cn.wildfire.chat.kit.qrcode.ScanQRCodeActivity;
 import cn.wildfire.chat.kit.search.SearchPortalActivity;
 import cn.wildfire.chat.kit.third.utils.UIUtils;
 import cn.wildfire.chat.kit.user.ChangeMyNameActivity;
@@ -49,18 +55,24 @@ import cn.wildfire.chat.kit.user.UserInfoActivity;
 import cn.wildfire.chat.kit.user.UserViewModel;
 import cn.wildfire.chat.kit.widget.ViewPagerFixed;
 import cn.wildfirechat.chat.R;
+import cn.wildfirechat.client.ConnectionStatus;
 import cn.wildfirechat.model.Conversation;
 import cn.wildfirechat.model.UserInfo;
+import cn.wildfirechat.remote.ChatManager;
 import q.rorbin.badgeview.QBadgeView;
 
 public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageChangeListener {
 
     private List<Fragment> mFragmentList = new ArrayList<>(4);
 
-    @Bind(R.id.bottomNavigationView)
+    @BindView(R.id.bottomNavigationView)
     BottomNavigationView bottomNavigationView;
-    @Bind(R.id.vpContent)
-    ViewPagerFixed mVpContent;
+    @BindView(R.id.contentViewPager)
+    ViewPagerFixed contentViewPager;
+    @BindView(R.id.startingTextView)
+    TextView startingTextView;
+    @BindView(R.id.contentLinearLayout)
+    LinearLayout contentLinearLayout;
 
     private QBadgeView unreadMessageUnreadBadgeView;
     private QBadgeView unreadFriendRequestBadgeView;
@@ -68,10 +80,19 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
     private static final int REQUEST_CODE_SCAN_QR_CODE = 100;
     private static final int REQUEST_IGNORE_BATTERY_CODE = 101;
 
-    private ConversationListFragment conversationListFragment;
-    private ContactFragment contactFragment;
-    private DiscoveryFragment discoveryFragment;
-    private MeFragment meFragment;
+    private boolean isInitialized = false;
+
+    private ContactListFragment contactListFragment;
+
+    private ContactViewModel contactViewModel;
+    private ConversationListViewModel conversationListViewModel;
+
+    private Observer<Boolean> imStatusLiveDataObserver = status -> {
+        if (status && !isInitialized) {
+            init();
+            isInitialized = true;
+        }
+    };
 
     @Override
     protected int contentLayout() {
@@ -79,46 +100,93 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (contactViewModel != null) {
+            contactViewModel.reloadFriendRequestStatus();
+            conversationListViewModel.reloadConversationUnreadStatus();
+        }
+    }
+
+    @Override
     protected void afterViews() {
+        IMServiceStatusViewModel imServiceStatusViewModel = ViewModelProviders.of(this).get(IMServiceStatusViewModel.class);
+        imServiceStatusViewModel.imServiceStatusLiveData().observe(this, imStatusLiveDataObserver);
+        IMConnectionStatusViewModel connectionStatusViewModel = ViewModelProviders.of(this).get(IMConnectionStatusViewModel.class);
+        connectionStatusViewModel.connectionStatusLiveData().observe(this, status -> {
+            if (status == ConnectionStatus.ConnectionStatusTokenIncorrect || status == ConnectionStatus.ConnectionStatusSecretKeyMismatch || status == ConnectionStatus.ConnectionStatusRejected || status == ConnectionStatus.ConnectionStatusLogout) {
+                ChatManager.Instance().disconnect(true);
+                reLogin();
+            }
+        });
+    }
+
+    private void reLogin() {
+        ChatManager.Instance().disconnect(true);
+        SharedPreferences sp = getSharedPreferences("config", Context.MODE_PRIVATE);
+        sp.edit().clear().apply();
+
+        Intent intent = new Intent(this, SplashActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
+        finish();
+    }
+
+    private void init() {
         initView();
 
-        ConversationListViewModel conversationListViewModel = ViewModelProviders
+        conversationListViewModel = ViewModelProviders
                 .of(this, new ConversationListViewModelFactory(Arrays.asList(Conversation.ConversationType.Single, Conversation.ConversationType.Group, Conversation.ConversationType.Channel), Arrays.asList(0)))
                 .get(ConversationListViewModel.class);
         conversationListViewModel.unreadCountLiveData().observe(this, unreadCount -> {
 
             if (unreadCount != null && unreadCount.unread > 0) {
-                if (unreadMessageUnreadBadgeView == null) {
-                    BottomNavigationMenuView bottomNavigationMenuView = ((BottomNavigationMenuView) bottomNavigationView.getChildAt(0));
-                    View view = bottomNavigationMenuView.getChildAt(0);
-                    unreadMessageUnreadBadgeView = new QBadgeView(MainActivity.this);
-                    unreadMessageUnreadBadgeView.bindTarget(view);
-                }
-                unreadMessageUnreadBadgeView.setBadgeNumber(unreadCount.unread);
-            } else if (unreadMessageUnreadBadgeView != null) {
-                unreadMessageUnreadBadgeView.hide(true);
+                showUnreadMessageBadgeView(unreadCount.unread);
+            } else {
+                hideUnreadMessageBadgeView();
             }
         });
 
-        ContactViewModel contactViewModel = ViewModelProviders.of(this).get(ContactViewModel.class);
+        contactViewModel = ViewModelProviders.of(this).get(ContactViewModel.class);
         contactViewModel.friendRequestUpdatedLiveData().observe(this, count -> {
             if (count == null || count == 0) {
-                if (unreadFriendRequestBadgeView != null) {
-                    unreadFriendRequestBadgeView.hide(true);
-                }
+                hideUnreadFriendRequestBadgeView();
             } else {
-                if (unreadFriendRequestBadgeView == null) {
-                    BottomNavigationMenuView bottomNavigationMenuView = ((BottomNavigationMenuView) bottomNavigationView.getChildAt(0));
-                    View view = bottomNavigationMenuView.getChildAt(1);
-                    unreadFriendRequestBadgeView = new QBadgeView(MainActivity.this);
-                    unreadFriendRequestBadgeView.bindTarget(view);
-                }
-                unreadFriendRequestBadgeView.setBadgeNumber(count);
+                showUnreadFriendRequestBadgeView(count);
             }
         });
+
         if (checkDisplayName()) {
             ignoreBatteryOption();
         }
+    }
+
+    private void showUnreadMessageBadgeView(int count) {
+        if (unreadMessageUnreadBadgeView == null) {
+            BottomNavigationMenuView bottomNavigationMenuView = ((BottomNavigationMenuView) bottomNavigationView.getChildAt(0));
+            View view = bottomNavigationMenuView.getChildAt(0);
+            unreadMessageUnreadBadgeView = new QBadgeView(MainActivity.this);
+            unreadMessageUnreadBadgeView.bindTarget(view);
+        }
+        unreadMessageUnreadBadgeView.setBadgeNumber(count);
+    }
+
+    private void hideUnreadMessageBadgeView() {
+        if (unreadMessageUnreadBadgeView != null) {
+            unreadMessageUnreadBadgeView.hide(true);
+            unreadFriendRequestBadgeView = null;
+        }
+    }
+
+
+    private void showUnreadFriendRequestBadgeView(int count) {
+        if (unreadFriendRequestBadgeView == null) {
+            BottomNavigationMenuView bottomNavigationMenuView = ((BottomNavigationMenuView) bottomNavigationView.getChildAt(0));
+            View view = bottomNavigationMenuView.getChildAt(1);
+            unreadFriendRequestBadgeView = new QBadgeView(MainActivity.this);
+            unreadFriendRequestBadgeView.bindTarget(view);
+        }
+        unreadFriendRequestBadgeView.setBadgeNumber(count);
     }
 
     public void hideUnreadFriendRequestBadgeView() {
@@ -146,33 +214,36 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
     private void initView() {
         setTitle(UIUtils.getString(R.string.app_name));
 
-        //设置ViewPager的最大缓存页面
-        mVpContent.setOffscreenPageLimit(3);
+        startingTextView.setVisibility(View.GONE);
+        contentLinearLayout.setVisibility(View.VISIBLE);
 
-        conversationListFragment = new ConversationListFragment();
-        contactFragment = new ContactFragment();
-        discoveryFragment = new DiscoveryFragment();
-        meFragment = new MeFragment();
+        //设置ViewPager的最大缓存页面
+        contentViewPager.setOffscreenPageLimit(3);
+
+        ConversationListFragment conversationListFragment = new ConversationListFragment();
+        contactListFragment = new ContactListFragment();
+        DiscoveryFragment discoveryFragment = new DiscoveryFragment();
+        MeFragment meFragment = new MeFragment();
         mFragmentList.add(conversationListFragment);
-        mFragmentList.add(contactFragment);
+        mFragmentList.add(contactListFragment);
         mFragmentList.add(discoveryFragment);
         mFragmentList.add(meFragment);
-        mVpContent.setAdapter(new HomeFragmentPagerAdapter(getSupportFragmentManager(), mFragmentList));
-        mVpContent.setOnPageChangeListener(this);
+        contentViewPager.setAdapter(new HomeFragmentPagerAdapter(getSupportFragmentManager(), mFragmentList));
+        contentViewPager.setOnPageChangeListener(this);
 
         bottomNavigationView.setOnNavigationItemSelectedListener(item -> {
             switch (item.getItemId()) {
                 case R.id.conversation_list:
-                    mVpContent.setCurrentItem(0);
+                    contentViewPager.setCurrentItem(0);
                     break;
                 case R.id.contact:
-                    mVpContent.setCurrentItem(1);
+                    contentViewPager.setCurrentItem(1);
                     break;
                 case R.id.discovery:
-                    mVpContent.setCurrentItem(2);
+                    contentViewPager.setCurrentItem(2);
                     break;
                 case R.id.me:
-                    mVpContent.setCurrentItem(3);
+                    contentViewPager.setCurrentItem(3);
                     break;
                 default:
                     break;
@@ -194,7 +265,14 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
                 searchUser();
                 break;
             case R.id.scan_qrcode:
-                startActivityForResult(new Intent(this, CaptureActivity.class), REQUEST_CODE_SCAN_QR_CODE);
+                String[] permissions = new String[]{Manifest.permission.CAMERA};
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    if (!checkPermission(permissions)) {
+                        requestPermissions(permissions, 100);
+                        return true;
+                    }
+                }
+                startActivityForResult(new Intent(this, ScanQRCodeActivity.class), REQUEST_CODE_SCAN_QR_CODE);
             default:
                 break;
         }
@@ -238,16 +316,16 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
             default:
                 break;
         }
-        contactFragment.showQuickIndexBar(position == 1);
+        contactListFragment.showQuickIndexBar(position == 1);
     }
 
     @Override
     public void onPageScrollStateChanged(int state) {
         if (state != ViewPager.SCROLL_STATE_IDLE) {
             //滚动过程中隐藏快速导航条
-            contactFragment.showQuickIndexBar(false);
+            contactListFragment.showQuickIndexBar(false);
         } else {
-            contactFragment.showQuickIndexBar(true);
+            contactListFragment.showQuickIndexBar(true);
         }
     }
 
@@ -271,12 +349,18 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
         }
     }
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 100 && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startActivityForResult(new Intent(this, ScanQRCodeActivity.class), REQUEST_CODE_SCAN_QR_CODE);
+        }
+    }
+
     private void onScanPcQrCode(String qrcode) {
         String prefix = qrcode.substring(0, qrcode.lastIndexOf('/') + 1);
         String value = qrcode.substring(qrcode.lastIndexOf("/") + 1);
-//        Uri uri = Uri.parse(value);
-//        uri.getAuthority();
-//        uri.getQuery()
         switch (prefix) {
             case WfcScheme.QR_CODE_PREFIX_PC_SESSION:
                 pcLogin(value);
@@ -304,7 +388,7 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
 
     private void showUser(String uid) {
 
-        UserViewModel userViewModel = WfcUIKit.getAppScopeViewModel(UserViewModel.class);
+        UserViewModel userViewModel = ViewModelProviders.of(this).get(UserViewModel.class);
         UserInfo userInfo = userViewModel.getUserInfo(uid, true);
         if (userInfo == null) {
             return;
@@ -327,7 +411,7 @@ public class MainActivity extends WfcBaseActivity implements ViewPager.OnPageCha
     }
 
     private boolean checkDisplayName() {
-        UserViewModel userViewModel = WfcUIKit.getAppScopeViewModel(UserViewModel.class);
+        UserViewModel userViewModel = ViewModelProviders.of(this).get(UserViewModel.class);
         SharedPreferences sp = getSharedPreferences("config", Context.MODE_PRIVATE);
         UserInfo userInfo = userViewModel.getUserInfo(userViewModel.getUserId(), false);
         if (userInfo != null && TextUtils.equals(userInfo.displayName, userInfo.mobile)) {

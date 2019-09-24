@@ -20,6 +20,7 @@ import cn.wildfirechat.message.core.PersistFlag;
 @ContentTag(type = MessageContentType.ContentType_Video, flag = PersistFlag.Persist_And_Count)
 public class VideoMessageContent extends MediaMessageContent {
     private Bitmap thumbnail;
+    private byte[] thumbnailBytes;
 
     // 所有消息都需要一个默认构造函数
     public VideoMessageContent() {
@@ -35,6 +36,9 @@ public class VideoMessageContent extends MediaMessageContent {
     }
 
     public Bitmap getThumbnail() {
+        if (thumbnailBytes != null) {
+            thumbnail = BitmapFactory.decodeByteArray(thumbnailBytes, 0, thumbnailBytes.length);
+        }
         return thumbnail;
     }
 
@@ -57,9 +61,7 @@ public class VideoMessageContent extends MediaMessageContent {
     @Override
     public void decode(MessagePayload payload) {
         super.decode(payload);
-        if (payload.binaryContent != null) {
-            thumbnail = BitmapFactory.decodeByteArray(payload.binaryContent, 0, payload.binaryContent.length);
-        }
+        thumbnailBytes = payload.binaryContent;
     }
 
     @Override
@@ -75,22 +77,15 @@ public class VideoMessageContent extends MediaMessageContent {
 
     @Override
     public void writeToParcel(Parcel dest, int flags) {
+        super.writeToParcel(dest, flags);
         dest.writeParcelable(this.thumbnail, flags);
-        dest.writeString(this.localPath);
-        dest.writeString(this.remoteUrl);
-        dest.writeInt(this.mediaType == null ? -1 : this.mediaType.ordinal());
-        dest.writeInt(this.mentionedType);
-        dest.writeStringList(this.mentionedTargets);
+        dest.writeByteArray(this.thumbnailBytes);
     }
 
     protected VideoMessageContent(Parcel in) {
+        super(in);
         this.thumbnail = in.readParcelable(Bitmap.class.getClassLoader());
-        this.localPath = in.readString();
-        this.remoteUrl = in.readString();
-        int tmpMediaType = in.readInt();
-        this.mediaType = tmpMediaType == -1 ? null : MessageContentMediaType.values()[tmpMediaType];
-        this.mentionedType = in.readInt();
-        this.mentionedTargets = in.createStringArrayList();
+        this.thumbnailBytes = in.createByteArray();
     }
 
     public static final Creator<VideoMessageContent> CREATOR = new Creator<VideoMessageContent>() {

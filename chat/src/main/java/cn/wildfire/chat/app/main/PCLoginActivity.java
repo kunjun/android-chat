@@ -10,12 +10,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 import androidx.lifecycle.ViewModelProviders;
-import butterknife.Bind;
+import butterknife.BindView;
 import butterknife.OnClick;
 import cn.wildfire.chat.app.Config;
 import cn.wildfire.chat.app.login.model.PCSession;
 import cn.wildfire.chat.kit.WfcBaseActivity;
-import cn.wildfire.chat.kit.WfcUIKit;
 import cn.wildfire.chat.kit.net.OKHttpHelper;
 import cn.wildfire.chat.kit.net.SimpleCallback;
 import cn.wildfire.chat.kit.user.UserViewModel;
@@ -24,7 +23,7 @@ import cn.wildfirechat.chat.R;
 public class PCLoginActivity extends WfcBaseActivity {
     private String token;
     private PCSession pcSession;
-    @Bind(R.id.confirmButton)
+    @BindView(R.id.confirmButton)
     Button confirmButton;
 
     @Override
@@ -47,7 +46,7 @@ public class PCLoginActivity extends WfcBaseActivity {
 
     @OnClick(R.id.confirmButton)
     void confirmPCLogin() {
-        UserViewModel userViewModel = WfcUIKit.getAppScopeViewModel(UserViewModel.class);
+        UserViewModel userViewModel =ViewModelProviders.of(this).get(UserViewModel.class);
         confirmPCLogin(token, userViewModel.getUserId());
     }
 
@@ -57,7 +56,7 @@ public class PCLoginActivity extends WfcBaseActivity {
                 .progress(true, 100)
                 .build();
         dialog.show();
-        String url = "http://" + Config.APP_SERVER_HOST + ":" + Config.APP_SERVER_PORT + "/scan_pc";
+        String url = Config.APP_SERVER_ADDRESS + "/scan_pc";
         url += "/" + token;
         OKHttpHelper.post(url, null, new SimpleCallback<PCSession>() {
             @Override
@@ -87,7 +86,7 @@ public class PCLoginActivity extends WfcBaseActivity {
     }
 
     private void confirmPCLogin(String token, String userId) {
-        String url = "http://" + Config.APP_SERVER_HOST + ":" + Config.APP_SERVER_PORT + "/confirm_pc";
+        String url = Config.APP_SERVER_ADDRESS + "/confirm_pc";
 
         Map<String, String> params = new HashMap<>(2);
         params.put("user_id", userId);

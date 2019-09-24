@@ -1,5 +1,6 @@
 package cn.wildfirechat.message;
 
+import android.os.Parcel;
 import android.os.Parcelable;
 
 import java.util.List;
@@ -24,8 +25,10 @@ public abstract class MessageContent implements Parcelable {
 
     //提醒对象，mentionedType 1时有效
     public List<String> mentionedTargets;
+    public String extra;
+    public String pushContent;
 
-    public int getType() {
+    final public int getType() {
         ContentTag tag = getClass().getAnnotation(ContentTag.class);
         if (tag != null) {
             return tag.type();
@@ -33,7 +36,7 @@ public abstract class MessageContent implements Parcelable {
         return -1;
     }
 
-    public PersistFlag getPersistFlag() {
+    final public PersistFlag getPersistFlag() {
         ContentTag tag = getClass().getAnnotation(ContentTag.class);
         if (tag != null) {
             return tag.flag();
@@ -41,5 +44,26 @@ public abstract class MessageContent implements Parcelable {
         return PersistFlag.No_Persist;
     }
 
+    @Override
+    public int describeContents() {
+        return 0;
+    }
 
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        dest.writeInt(this.mentionedType);
+        dest.writeStringList(this.mentionedTargets);
+        dest.writeString(this.extra);
+        dest.writeString(this.pushContent);
+    }
+
+    public MessageContent() {
+    }
+
+    protected MessageContent(Parcel in) {
+        this.mentionedType = in.readInt();
+        this.mentionedTargets = in.createStringArrayList();
+        this.extra = in.readString();
+        this.pushContent = in.readString();
+    }
 }
